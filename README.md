@@ -10,6 +10,7 @@ threads и turns. SDK не устанавливает Codex, не управля
 учётные данные и не реализует прикладной workflow пользователя.
 
 <a id="navigation"></a>
+
 ## Навигация
 
 - [Что делает Aether](#overview)
@@ -18,9 +19,9 @@ threads и turns. SDK не устанавливает Codex, не управля
 - [Raw RPC и MCP](#raw-rpc-and-mcp)
 - [Разработка](#development)
 - [Совместимость](#compatibility)
-- [Лицензия](#license)
 
 <a id="overview"></a>
+
 ## Что делает Aether
 
 Aether предоставляет consumer-neutral границу между Go-приложением и Codex App
@@ -36,6 +37,7 @@ Server:
 - оставляет raw `Call` и `Notify` для новых и неподдержанных методов.
 
 <a id="quick-start"></a>
+
 ## Быстрый старт
 
 ### Требования
@@ -80,6 +82,7 @@ fmt.Println(result.FinalText)
 ```
 
 <a id="behavior"></a>
+
 ## Поведение
 
 - `Client` безопасен для конкурентного использования.
@@ -100,6 +103,7 @@ fmt.Println(result.FinalText)
 `TurnResult`.
 
 <a id="raw-rpc-and-mcp"></a>
+
 ## Raw RPC и MCP
 
 `Call` и `Notify` — поддерживаемые forward-compatible escape hatches. Конфигурацией
@@ -113,6 +117,7 @@ err := client.Call(ctx, "mcpServerStatus/list", struct{}{}, &status)
 ```
 
 <a id="development"></a>
+
 ## Разработка
 
 ```bash
