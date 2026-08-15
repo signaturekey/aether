@@ -128,19 +128,3 @@ Hermetic-тесты используют fake child App Server и не треб�
 ```bash
 AETHER_LIVE=1 go test -run TestLiveAppServerSmoke -v .
 ```
-
-<a id="compatibility"></a>
-## Совместимость
-
-Aether ориентирован на стабильный App Server API и не включает `experimentalApi`.
-Hermetic-разработка выполнялась на Go 1.26.4. Ephemeral live smoke успешно прошёл
-на `codex-cli 0.146.0`, macOS arm64, 15 августа 2026 года.
-
-`ThreadOptions.Sandbox` передаётся без преобразований, потому что написание enum
-определяет установленный runtime. Проверенный `codex-cli 0.146.0` принимает
-`read-only`, `workspace-write` и `danger-full-access`.
-
-<a id="license"></a>
-## Лицензия
-
-MIT. См. [`LICENSE`](LICENSE).
