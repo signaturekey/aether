@@ -242,6 +242,30 @@ func TestLateStartAfterCancellationMakesThreadUnavailable(t *testing.T) {
 	}
 }
 
+func TestLateItemBeforeTurnStartResponseDoesNotBreakRun(t *testing.T) {
+	client := startHelper(t, "late_item_before_start_response", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := thread.Run(context.Background(), textTurn("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := thread.Run(context.Background(), textTurn("second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TurnID != "turn_2" || result.FinalText != "done for "+thread.ID() {
+		t.Fatalf("result = %#v", result)
+	}
+	for _, item := range result.Items {
+		if strings.Contains(string(item), "late item") {
+			t.Fatalf("late item from previous turn was retained: %s", item)
+		}
+	}
+}
+
 func TestLateCompletionCannotFinishAnotherTurn(t *testing.T) {
 	state := newTurnState("thr_1", false)
 	if err := state.setTurnID("turn_new"); err != nil {

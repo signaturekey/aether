@@ -61,8 +61,18 @@ type turnState struct {
 	failure    *TurnFailure
 	structured bool
 
-	done     chan turnCompletion
-	finished bool
+	pendingEvents []pendingTurnEvent
+	done          chan turnCompletion
+	finished      bool
+}
+
+type pendingTurnEvent struct {
+	turnID    string
+	item      json.RawMessage
+	status    TurnStatus
+	items     []json.RawMessage
+	failure   *TurnFailure
+	completed bool
 }
 
 type turnCompletion struct {
@@ -293,6 +303,17 @@ func (s *turnState) setTurnID(turnID string) error {
 		return fmt.Errorf("turn id changed from %s to %s", s.turnID, turnID)
 	}
 	s.turnID = turnID
+	for _, event := range s.pendingEvents {
+		if event.turnID != turnID || s.finished {
+			continue
+		}
+		if event.completed {
+			s.completeLocked(event.status, event.items, event.failure)
+			continue
+		}
+		s.addItemLocked(event.item)
+	}
+	s.pendingEvents = nil
 	return nil
 }
 
@@ -308,36 +329,63 @@ func (s *turnState) addItem(turnID string, item json.RawMessage) {
 	if s.finished {
 		return
 	}
-	if s.turnID != "" && turnID != "" && s.turnID != turnID {
+	if s.turnID == "" {
+		s.pendingEvents = append(s.pendingEvents, pendingTurnEvent{
+			turnID: turnID,
+			item:   append(json.RawMessage(nil), item...),
+		})
 		return
 	}
-	if s.turnID == "" && turnID != "" {
-		s.turnID = turnID
+	if s.turnID != turnID {
+		return
 	}
+	s.addItemLocked(item)
+}
+
+func (s *turnState) addItemLocked(item json.RawMessage) {
 	s.items = append(s.items, append(json.RawMessage(nil), item...))
 }
 
 func (s *turnState) complete(turnID string, status TurnStatus, items []json.RawMessage, failure *TurnFailure) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.finished || (s.turnID != "" && s.turnID != turnID) {
+	if s.finished {
 		return
 	}
 	if s.turnID == "" {
-		s.turnID = turnID
+		s.pendingEvents = append(s.pendingEvents, pendingTurnEvent{
+			turnID:    turnID,
+			status:    status,
+			items:     cloneRawMessages(items),
+			failure:   cloneTurnFailure(failure),
+			completed: true,
+		})
+		return
 	}
+	if s.turnID != turnID {
+		return
+	}
+	s.completeLocked(status, items, failure)
+}
+
+func (s *turnState) completeLocked(status TurnStatus, items []json.RawMessage, failure *TurnFailure) {
 	s.finished = true
 	s.status = status
 	if len(items) != 0 {
 		s.items = cloneRawMessages(items)
 	}
-	if failure != nil {
-		copyFailure := *failure
-		copyFailure.CodexErrorInfo = append(json.RawMessage(nil), failure.CodexErrorInfo...)
-		copyFailure.AdditionalDetails = append(json.RawMessage(nil), failure.AdditionalDetails...)
-		s.failure = &copyFailure
-	}
+	s.failure = cloneTurnFailure(failure)
 	s.done <- turnCompletion{result: s.snapshotLocked()}
+}
+
+func cloneTurnFailure(failure *TurnFailure) *TurnFailure {
+	if failure == nil {
+		return nil
+	}
+	copyFailure := *failure
+	copyFailure.CodexErrorInfo = append(json.RawMessage(nil), failure.CodexErrorInfo...)
+	copyFailure.AdditionalDetails = append(json.RawMessage(nil), failure.AdditionalDetails...)
+	return &copyFailure
 }
 
 func (s *turnState) fail(err error) {

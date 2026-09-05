@@ -149,6 +149,12 @@ func (s *helperServer) startTurn(id json.RawMessage, params json.RawMessage) {
 	s.nextTurn++
 	turnID := "turn_" + strconv.Itoa(s.nextTurn)
 	s.turns[request.ThreadID] = turnID
+	if s.scenario == "late_item_before_start_response" && s.nextTurn == 2 {
+		s.send(map[string]any{"method": "item/completed", "params": map[string]any{
+			"threadId": request.ThreadID, "turnId": "turn_1",
+			"item": map[string]any{"id": "late", "type": "agentMessage", "text": "late item"},
+		}})
+	}
 	if s.scenario == "delayed_start" {
 		time.Sleep(80 * time.Millisecond)
 	}
