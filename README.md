@@ -89,8 +89,15 @@ fmt.Println(result.FinalText)
 - Разные threads могут выполнять turns параллельно. В одном thread одновременно
   разрешён только один `Run`; второй вернёт `aether.ErrTurnActive`.
 - `Run` завершается только после authoritative-уведомления `turn/completed`.
+- `TurnResult.Items` сохраняет канонические `item/completed`; items из completion
+  используются только когда потоковых items не было.
+- `TurnRequest.OutputSchema` со значением `nil` или JSON `null` не включает
+  structured-output validation.
 - Отмена `Run` отправляет `turn/interrupt` через внутренний bounded context и не
   останавливает клиент или несвязанные turns.
+- Если после отмены невозможно достоверно установить или завершить turn, этот
+  `Thread` больше не принимает `Run` и возвращает `aether.ErrThreadStateUnknown`.
+  Создайте новый thread вместо повторного запуска в неопределённом состоянии.
 - Отмена raw `Call` удаляет локальный waiter, но сервер уже мог выполнить запрос.
   Aether не делает автоматических retry.
 - Неизвестные поля, методы уведомлений и типы items безопасно игнорируются или
@@ -100,7 +107,8 @@ fmt.Println(result.FinalText)
 
 Ошибки сохраняют структурированный контекст и поддерживают `errors.Is` и
 `errors.As`. Это относится к `RPCError`, `ProcessError` и `TurnError` с частичным
-`TurnResult`.
+`TurnResult`. `TurnFailure.Raw` сохраняет полный payload terminal error для
+развивающихся полей App Server.
 
 <a id="raw-rpc-and-mcp"></a>
 
@@ -121,7 +129,8 @@ err := client.Call(ctx, "mcpServerStatus/list", struct{}{}, &status)
 ## Разработка
 
 ```bash
-gofmt -w .
+gofmt -w <изменённые Go-файлы>
+gofmt -l .
 go test ./...
 go test -race ./...
 go vet ./...

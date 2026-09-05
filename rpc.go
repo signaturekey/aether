@@ -122,6 +122,24 @@ func (c *Client) sendWire(ctx context.Context, data []byte) error {
 	}
 }
 
+func (c *Client) sendWireAsync(data []byte) bool {
+	c.mu.Lock()
+	closing := c.closing
+	terminalErr := c.terminalErr
+	c.mu.Unlock()
+	if closing || terminalErr != nil {
+		return false
+	}
+	select {
+	case c.writeCh <- writeRequest{data: data}:
+		return true
+	case <-c.terminal:
+		return false
+	default:
+		return false
+	}
+}
+
 func (c *Client) dispatchResponse(msg jsonrpc.Message) {
 	var id uint64
 	if err := json.Unmarshal(msg.ID, &id); err != nil {
@@ -198,6 +216,9 @@ func (c *Client) handleServerRequest(request ServerRequest) {
 			wireErr.Data = rpcErr.Data
 		}
 		wire, err = jsonrpc.EncodeError(request.ID, wireErr)
+	}
+	if err != nil {
+		wire, err = jsonrpc.EncodeError(request.ID, jsonrpc.RPCError{Code: -32603, Message: "internal error"})
 	}
 	if err == nil {
 		_ = c.sendWire(c.ctx, wire)

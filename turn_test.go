@@ -56,6 +56,20 @@ func TestInvalidStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestNullOutputSchemaAllowsTextOutput(t *testing.T) {
+	client := startHelper(t, "", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := textTurn("plain")
+	req.OutputSchema = json.RawMessage(` null `)
+	result, err := thread.Run(context.Background(), req)
+	if err != nil || result.FinalText != "done for "+thread.ID() || len(result.JSON) != 0 {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+}
+
 func TestFailedTurnPreservesResult(t *testing.T) {
 	client := startHelper(t, "failed_turn", nil)
 	thread, err := client.StartThread(context.Background(), ThreadOptions{})
@@ -66,6 +80,24 @@ func TestFailedTurnPreservesResult(t *testing.T) {
 	var turnErr *TurnError
 	if !errors.As(err, &turnErr) || result.Status != TurnStatusFailed || result.Failure == nil || result.Failure.Message != "model failed" {
 		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+}
+
+func TestFailedTurnPreservesRawErrorPayload(t *testing.T) {
+	client := startHelper(t, "failed_misalignment", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := thread.Run(context.Background(), textTurn("fail"))
+	if err == nil || result.Failure == nil {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	var raw struct {
+		Misalignment json.RawMessage `json:"misalignment"`
+	}
+	if json.Unmarshal(result.Failure.Raw, &raw) != nil || string(raw.Misalignment) == "" {
+		t.Fatalf("raw failure = %s", result.Failure.Raw)
 	}
 }
 
@@ -206,6 +238,166 @@ func TestInterruptTimeoutIsBounded(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("interrupt timeout was not bounded")
+	}
+	if _, err := thread.Run(context.Background(), textTurn("second")); !errors.Is(err, ErrThreadStateUnknown) {
+		t.Fatalf("error = %v, want ErrThreadStateUnknown", err)
+	}
+}
+
+func TestLateStartAfterCancellationMakesThreadUnavailable(t *testing.T) {
+	client := startHelper(t, "delayed_start", func(opts *Options) {
+		opts.InterruptTimeout = 30 * time.Millisecond
+	})
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := thread.Run(ctx, textTurn("hold"))
+		done <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrThreadStateUnknown) {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn/start cancellation recovery did not time out")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := thread.Run(context.Background(), textTurn("second")); !errors.Is(err, ErrThreadStateUnknown) {
+		t.Fatalf("error = %v, want ErrThreadStateUnknown", err)
+	}
+}
+
+func TestLateItemBeforeTurnStartResponseDoesNotBreakRun(t *testing.T) {
+	client := startHelper(t, "late_item_before_start_response", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := thread.Run(context.Background(), textTurn("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := thread.Run(context.Background(), textTurn("second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TurnID != "turn_2" || result.FinalText != "done for "+thread.ID() {
+		t.Fatalf("result = %#v", result)
+	}
+	for _, item := range result.Items {
+		if strings.Contains(string(item), "late item") {
+			t.Fatalf("late item from previous turn was retained: %s", item)
+		}
+	}
+}
+
+func TestLateCompletionCannotFinishAnotherTurn(t *testing.T) {
+	state := newTurnState("thr_1", false)
+	if err := state.setTurnID("turn_new"); err != nil {
+		t.Fatal(err)
+	}
+	state.complete("turn_old", TurnStatusCompleted, nil, nil)
+	select {
+	case completion := <-state.done:
+		t.Fatalf("unexpected completion: %#v", completion)
+	default:
+	}
+	state.complete("turn_new", TurnStatusCompleted, nil, nil)
+	select {
+	case completion := <-state.done:
+		if completion.result.TurnID != "turn_new" || completion.result.Status != TurnStatusCompleted {
+			t.Fatalf("completion = %#v", completion)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected completion")
+	}
+}
+
+func TestCompletionBeforeInterruptErrorKeepsThreadUsable(t *testing.T) {
+	client := startHelper(t, "completion_before_interrupt_error", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		result TurnResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := thread.Run(ctx, textTurn("hold"))
+		done <- struct {
+			result TurnResult
+			err    error
+		}{result, err}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || got.result.Status != TurnStatusCompleted {
+			t.Fatalf("result=%#v error=%v", got.result, got.err)
+		}
+		if errors.Is(got.err, ErrThreadStateUnknown) {
+			t.Fatalf("error = %v, thread state must remain known", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled turn did not finish")
+	}
+	if result, err := thread.Run(context.Background(), textTurn("next")); err != nil || result.Status != TurnStatusCompleted {
+		t.Fatalf("thread unusable after authoritative completion: result=%#v error=%v", result, err)
+	}
+}
+
+func TestLateInterruptedCompletionDoesNotReopenThread(t *testing.T) {
+	client := startHelper(t, "late_interrupt_completion", func(opts *Options) {
+		opts.InterruptTimeout = 30 * time.Millisecond
+	})
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := thread.Run(ctx, textTurn("hold"))
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrThreadStateUnknown) {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("interrupt timeout was not bounded")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := thread.Run(context.Background(), textTurn("second")); !errors.Is(err, ErrThreadStateUnknown) {
+		t.Fatalf("error = %v, want ErrThreadStateUnknown", err)
+	}
+}
+
+func TestCompletionSummaryDoesNotReplaceStreamedItems(t *testing.T) {
+	state := newTurnState("thr_1", false)
+	if err := state.setTurnID("turn_1"); err != nil {
+		t.Fatal(err)
+	}
+	command := json.RawMessage(`{"id":"command","type":"commandExecution"}`)
+	state.addItem("turn_1", command)
+	summary := json.RawMessage(`{"id":"final","type":"agentMessage","text":"done"}`)
+	state.complete("turn_1", TurnStatusCompleted, []json.RawMessage{summary}, nil)
+	completion := <-state.done
+	if len(completion.result.Items) != 1 || string(completion.result.Items[0]) != string(command) {
+		t.Fatalf("items = %s", completion.result.Items)
 	}
 }
 

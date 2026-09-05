@@ -10,6 +10,7 @@ var (
 	ErrClosed             = errors.New("aether client closed")
 	ErrProcessExited      = errors.New("codex app-server exited")
 	ErrTurnActive         = errors.New("thread already has an active turn")
+	ErrThreadStateUnknown = errors.New("thread state is unknown")
 	ErrTurnInterrupted    = errors.New("turn interrupted")
 	ErrInvalidOutput      = errors.New("invalid structured output")
 	ErrUnsupportedMessage = errors.New("unsupported app-server message")

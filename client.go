@@ -2,6 +2,7 @@ package aether
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +14,12 @@ import (
 	"github.com/signaturekey/aether/internal/jsonrpc"
 )
 
-const stderrTailLimit = 32 << 10
+const (
+	stderrTailLimit          = 32 << 10
+	maxServerRequestHandlers = 16
+	maxQueuedWrites          = maxServerRequestHandlers * 4
+	stdoutEOFWait            = 20 * time.Millisecond
+)
 
 type Client struct {
 	cmd    *exec.Cmd
@@ -26,7 +32,8 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	writeCh chan writeRequest
+	writeCh        chan writeRequest
+	serverRequests chan ServerRequest
 
 	mu          sync.Mutex
 	nextID      uint64
@@ -90,27 +97,31 @@ func Start(ctx context.Context, options Options) (*Client, error) {
 
 	lifecycle, cancel := context.WithCancel(context.Background())
 	c := &Client{
-		cmd:         cmd,
-		stdin:       stdin,
-		stdout:      stdout,
-		stderr:      stderr,
-		opts:        opts,
-		ctx:         lifecycle,
-		cancel:      cancel,
-		writeCh:     make(chan writeRequest),
-		pending:     make(map[uint64]chan callResponse),
-		activeTurns: make(map[string]*turnState),
-		terminal:    make(chan struct{}),
-		processDone: make(chan struct{}),
-		stderrDone:  make(chan struct{}),
-		closeDone:   make(chan struct{}),
-		stderrTail:  newTailBuffer(stderrTailLimit),
+		cmd:            cmd,
+		stdin:          stdin,
+		stdout:         stdout,
+		stderr:         stderr,
+		opts:           opts,
+		ctx:            lifecycle,
+		cancel:         cancel,
+		writeCh:        make(chan writeRequest, maxQueuedWrites),
+		serverRequests: make(chan ServerRequest, maxServerRequestHandlers),
+		pending:        make(map[uint64]chan callResponse),
+		activeTurns:    make(map[string]*turnState),
+		terminal:       make(chan struct{}),
+		processDone:    make(chan struct{}),
+		stderrDone:     make(chan struct{}),
+		closeDone:      make(chan struct{}),
+		stderrTail:     newTailBuffer(stderrTailLimit),
 	}
 
 	go c.writeLoop()
 	go c.decodeLoop()
 	go c.stderrLoop()
 	go c.waitLoop()
+	for range maxServerRequestHandlers {
+		go c.serverRequestLoop()
+	}
 
 	handshakeCtx, handshakeCancel := context.WithTimeout(ctx, opts.HandshakeTimeout)
 	defer handshakeCancel()
@@ -182,12 +193,12 @@ func (c *Client) writeLoop() {
 			return
 		case req := <-c.writeCh:
 			_, err := c.stdin.Write(req.data)
-			req.done <- err
+			if req.done != nil {
+				req.done <- err
+			}
 			if err != nil {
 				c.terminate(fmt.Errorf("write app-server stdin: %w", err))
-				if c.cmd.Process != nil {
-					_ = c.cmd.Process.Kill()
-				}
+				c.killProcess()
 				return
 			}
 		}
@@ -200,12 +211,21 @@ func (c *Client) decodeLoop() {
 		msg, err := jsonrpc.Decode(dec)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				select {
+				case <-c.processDone:
+					return
+				case <-time.After(stdoutEOFWait):
+				}
+				c.terminate(&ProcessError{
+					ExitCode: -1,
+					Cause:    errors.Join(ErrProcessExited, errors.New("app-server stdout closed")),
+					Stderr:   c.stderrTail.String(),
+				})
+				c.killProcess()
 				return
 			}
 			c.terminate(errors.Join(ErrUnsupportedMessage, fmt.Errorf("decode app-server stdout: %w", err)))
-			if c.cmd.Process != nil {
-				_ = c.cmd.Process.Kill()
-			}
+			c.killProcess()
 			return
 		}
 		switch msg.Kind {
@@ -215,9 +235,40 @@ func (c *Client) decodeLoop() {
 			c.dispatchNotification(msg.Method, msg.Params)
 		case jsonrpc.Request:
 			request := ServerRequest{ID: msg.ID, Method: msg.Method, Params: msg.Params}
-			go c.handleServerRequest(request)
+			c.enqueueServerRequest(request)
 		default:
 			c.terminate(ErrUnsupportedMessage)
+		}
+	}
+}
+
+func (c *Client) enqueueServerRequest(request ServerRequest) {
+	if c.opts.Handlers[request.Method] == nil {
+		c.rejectServerRequest(request.ID, -32601, "method not found")
+		return
+	}
+	select {
+	case c.serverRequests <- request:
+	default:
+		c.rejectServerRequest(request.ID, -32000, "server request queue is full")
+	}
+}
+
+func (c *Client) rejectServerRequest(id json.RawMessage, code int, message string) {
+	wire, err := jsonrpc.EncodeError(id, jsonrpc.RPCError{Code: code, Message: message})
+	if err != nil || !c.sendWireAsync(wire) {
+		c.terminate(errors.New(message))
+		c.killProcess()
+	}
+}
+
+func (c *Client) serverRequestLoop() {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case request := <-c.serverRequests:
+			c.handleServerRequest(request)
 		}
 	}
 }
@@ -264,6 +315,12 @@ func (c *Client) terminate(err error) {
 		failCalls(pending, err)
 		failTurns(active, err)
 	})
+}
+
+func (c *Client) killProcess() {
+	if c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
 }
 
 func (c *Client) takePendingLocked() []chan callResponse {

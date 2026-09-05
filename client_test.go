@@ -154,6 +154,24 @@ func TestProcessExitFailsPendingCalls(t *testing.T) {
 	}
 }
 
+func TestStdoutEOFFailsPendingCallsAndStopsProcess(t *testing.T) {
+	client := startHelper(t, "", nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Call(context.Background(), "block", nil, nil)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	_ = client.Call(context.Background(), "closeStdout", nil, nil)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrProcessExited) {
+			t.Fatalf("error = %v, want process exit", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending call did not unblock after stdout EOF")
+	}
+}
+
 func TestFailingStderrSinkDoesNotStopDrain(t *testing.T) {
 	client := startHelper(t, "", func(opts *Options) {
 		opts.Stderr = rejectingWriter{}
@@ -172,6 +190,30 @@ func TestCloseIsIdempotentAndCallsAfterCloseFail(t *testing.T) {
 	}
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if err := client.Call(context.Background(), "echo", nil, nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("error = %v, want ErrClosed", err)
+	}
+}
+
+func TestConcurrentCloseIsIdempotent(t *testing.T) {
+	client := startHelper(t, "", nil)
+	const closers = 32
+	errs := make(chan error, closers)
+	var wg sync.WaitGroup
+	for range closers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- client.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := client.Call(context.Background(), "echo", nil, nil); !errors.Is(err, ErrClosed) {
 		t.Fatalf("error = %v, want ErrClosed", err)
@@ -210,6 +252,12 @@ func TestServerRequestHandlers(t *testing.T) {
 		}, 4321, ""},
 		{"panic", "demo/panic", func(context.Context, ServerRequest) (any, error) {
 			panic("boom")
+		}, -32603, ""},
+		{"unserializable result", "demo/unserializable-result", func(context.Context, ServerRequest) (any, error) {
+			return make(chan struct{}), nil
+		}, -32603, ""},
+		{"unserializable error data", "demo/unserializable-error", func(context.Context, ServerRequest) (any, error) {
+			return nil, &RPCError{Code: 4321, Message: "declined", Data: json.RawMessage(`{`)}
 		}, -32603, ""},
 		{"unknown", "demo/unknown", nil, -32601, ""},
 	}
@@ -257,5 +305,75 @@ func TestSlowHandlerDoesNotBlockDecoder(t *testing.T) {
 	defer cancel()
 	if err := client.Call(ctx, "echo", map[string]bool{"ok": true}, nil); err != nil {
 		t.Fatalf("decoder blocked by handler: %v", err)
+	}
+}
+
+func TestUnknownServerRequestDoesNotWaitForBusyHandlers(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{}, maxServerRequestHandlers)
+	client := startHelper(t, "", func(opts *Options) {
+		opts.Handlers = map[string]RequestHandler{
+			"demo/block": func(context.Context, ServerRequest) (any, error) {
+				started <- struct{}{}
+				<-release
+				return nil, nil
+			},
+		}
+	})
+	if err := client.Call(context.Background(), "triggerServerRequests", map[string]any{
+		"method": "demo/block", "count": maxServerRequestHandlers,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for range maxServerRequestHandlers {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("server request handlers did not start")
+		}
+	}
+	if err := client.Call(context.Background(), "triggerServerRequest", map[string]string{"method": "demo/unknown"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var response struct {
+		Error *wireTestError `json:"error"`
+	}
+	if err := client.Call(ctx, "awaitServerResponse", nil, &response); err != nil {
+		t.Fatalf("unknown request waited for a handler: %v", err)
+	}
+	if response.Error == nil || response.Error.Code != -32601 {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestServerRequestQueueIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	client := startHelper(t, "", func(opts *Options) {
+		opts.Handlers = map[string]RequestHandler{
+			"demo/block": func(context.Context, ServerRequest) (any, error) {
+				<-release
+				return map[string]bool{"ok": true}, nil
+			},
+		}
+	})
+	if err := client.Call(context.Background(), "triggerServerRequests", map[string]any{
+		"method": "demo/block", "count": maxServerRequestHandlers*2 + 1,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var response struct {
+		Error *wireTestError `json:"error"`
+	}
+	if err := client.Call(ctx, "awaitServerResponse", nil, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != -32000 {
+		t.Fatalf("response = %#v", response)
 	}
 }

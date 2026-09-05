@@ -19,9 +19,10 @@ type Thread struct {
 	client *Client
 	id     string
 
-	mu     sync.Mutex
-	active bool
-	closed bool
+	mu      sync.Mutex
+	active  bool
+	closed  bool
+	unknown bool
 }
 
 func (c *Client) StartThread(ctx context.Context, opts ThreadOptions) (*Thread, error) {
@@ -71,6 +72,9 @@ func (t *Thread) beginRun() error {
 	if t.active {
 		return ErrTurnActive
 	}
+	if t.unknown {
+		return ErrThreadStateUnknown
+	}
 	t.active = true
 	return nil
 }
@@ -78,5 +82,11 @@ func (t *Thread) beginRun() error {
 func (t *Thread) endRun() {
 	t.mu.Lock()
 	t.active = false
+	t.mu.Unlock()
+}
+
+func (t *Thread) markStateUnknown() {
+	t.mu.Lock()
+	t.unknown = true
 	t.mu.Unlock()
 }

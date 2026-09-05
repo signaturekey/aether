@@ -1,6 +1,7 @@
 package aether
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,18 @@ type TurnFailure struct {
 	Message           string          `json:"message"`
 	CodexErrorInfo    json.RawMessage `json:"codexErrorInfo,omitempty"`
 	AdditionalDetails json.RawMessage `json:"additionalDetails,omitempty"`
+	Raw               json.RawMessage `json:"-"`
+}
+
+func (f *TurnFailure) UnmarshalJSON(data []byte) error {
+	type turnFailure TurnFailure
+	var decoded turnFailure
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*f = TurnFailure(decoded)
+	f.Raw = append(json.RawMessage(nil), data...)
+	return nil
 }
 
 type TurnResult struct {
@@ -61,8 +74,18 @@ type turnState struct {
 	failure    *TurnFailure
 	structured bool
 
-	done chan turnCompletion
-	once sync.Once
+	pendingEvents []pendingTurnEvent
+	done          chan turnCompletion
+	finished      bool
+}
+
+type pendingTurnEvent struct {
+	turnID    string
+	item      json.RawMessage
+	status    TurnStatus
+	items     []json.RawMessage
+	failure   *TurnFailure
+	completed bool
 }
 
 type turnCompletion struct {
@@ -92,7 +115,7 @@ func (t *Thread) Run(ctx context.Context, req TurnRequest) (TurnResult, error) {
 	}
 	defer t.endRun()
 
-	state := newTurnState(t.id, len(req.OutputSchema) != 0)
+	state := newTurnState(t.id, hasOutputSchema(req.OutputSchema))
 	if err := t.client.registerTurn(t.id, state); err != nil {
 		return TurnResult{}, err
 	}
@@ -163,8 +186,9 @@ func (t *Thread) recoverCancelledStart(
 		}
 		return t.interruptAfterCancellation(callerCtx.Err(), state)
 	case <-timer.C:
+		t.markStateUnknown()
 		cancelStart()
-		return state.snapshot(), &TurnError{Result: state.snapshot(), Cause: errors.Join(callerCtx.Err(), errors.New("timed out recovering turn/start after cancellation"))}
+		return state.snapshot(), &TurnError{Result: state.snapshot(), Cause: errors.Join(callerCtx.Err(), ErrThreadStateUnknown, errors.New("timed out recovering turn/start after cancellation"))}
 	case completion := <-state.done:
 		return completion.result, &TurnError{Result: completion.result, Cause: callerCtx.Err()}
 	}
@@ -195,15 +219,22 @@ func (t *Thread) interruptAfterCancellation(callerErr error, state *turnState) (
 		select {
 		case completion := <-state.done:
 			result := completion.result
-			return result, &TurnError{Result: result, Cause: callerErr}
+			return result, &TurnError{Result: result, Cause: errors.Join(callerErr, completion.err)}
 		case <-interruptCtx.Done():
 			interruptErr = errors.New("timed out waiting for interrupted turn/completed")
 		case <-t.client.terminal:
 			interruptErr = t.client.getTerminalError()
 		}
 	}
+	select {
+	case completion := <-state.done:
+		result := completion.result
+		return result, &TurnError{Result: result, Cause: errors.Join(callerErr, completion.err)}
+	default:
+	}
 	result := state.snapshot()
-	return result, &TurnError{Result: result, Cause: errors.Join(callerErr, interruptErr)}
+	t.markStateUnknown()
+	return result, &TurnError{Result: result, Cause: errors.Join(callerErr, ErrThreadStateUnknown, interruptErr)}
 }
 
 func (t *Thread) Interrupt(ctx context.Context, turnID string) error {
@@ -291,6 +322,17 @@ func (s *turnState) setTurnID(turnID string) error {
 		return fmt.Errorf("turn id changed from %s to %s", s.turnID, turnID)
 	}
 	s.turnID = turnID
+	for _, event := range s.pendingEvents {
+		if event.turnID != turnID || s.finished {
+			continue
+		}
+		if event.completed {
+			s.completeLocked(event.status, event.items, event.failure)
+			continue
+		}
+		s.addItemLocked(event.item)
+	}
+	s.pendingEvents = nil
 	return nil
 }
 
@@ -303,46 +345,77 @@ func (s *turnState) getTurnID() string {
 func (s *turnState) addItem(turnID string, item json.RawMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.turnID != "" && turnID != "" && s.turnID != turnID {
+	if s.finished {
 		return
 	}
-	if s.turnID == "" && turnID != "" {
-		s.turnID = turnID
+	if s.turnID == "" {
+		s.pendingEvents = append(s.pendingEvents, pendingTurnEvent{
+			turnID: turnID,
+			item:   append(json.RawMessage(nil), item...),
+		})
+		return
 	}
+	if s.turnID != turnID {
+		return
+	}
+	s.addItemLocked(item)
+}
+
+func (s *turnState) addItemLocked(item json.RawMessage) {
 	s.items = append(s.items, append(json.RawMessage(nil), item...))
 }
 
 func (s *turnState) complete(turnID string, status TurnStatus, items []json.RawMessage, failure *TurnFailure) {
-	s.once.Do(func() {
-		s.mu.Lock()
-		if s.turnID == "" {
-			s.turnID = turnID
-		}
-		if s.turnID != turnID {
-			s.mu.Unlock()
-			s.done <- turnCompletion{result: s.snapshot(), err: fmt.Errorf("received completion for unexpected turn %s", turnID)}
-			return
-		}
-		s.status = status
-		if len(s.items) == 0 {
-			for _, item := range items {
-				s.items = append(s.items, append(json.RawMessage(nil), item...))
-			}
-		}
-		if failure != nil {
-			copyFailure := *failure
-			s.failure = &copyFailure
-		}
-		result := s.snapshotLocked()
-		s.mu.Unlock()
-		s.done <- turnCompletion{result: result}
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return
+	}
+	if s.turnID == "" {
+		s.pendingEvents = append(s.pendingEvents, pendingTurnEvent{
+			turnID:    turnID,
+			status:    status,
+			items:     cloneRawMessages(items),
+			failure:   cloneTurnFailure(failure),
+			completed: true,
+		})
+		return
+	}
+	if s.turnID != turnID {
+		return
+	}
+	s.completeLocked(status, items, failure)
+}
+
+func (s *turnState) completeLocked(status TurnStatus, items []json.RawMessage, failure *TurnFailure) {
+	s.finished = true
+	s.status = status
+	if len(s.items) == 0 && len(items) != 0 {
+		s.items = cloneRawMessages(items)
+	}
+	s.failure = cloneTurnFailure(failure)
+	s.done <- turnCompletion{result: s.snapshotLocked()}
+}
+
+func cloneTurnFailure(failure *TurnFailure) *TurnFailure {
+	if failure == nil {
+		return nil
+	}
+	copyFailure := *failure
+	copyFailure.CodexErrorInfo = append(json.RawMessage(nil), failure.CodexErrorInfo...)
+	copyFailure.AdditionalDetails = append(json.RawMessage(nil), failure.AdditionalDetails...)
+	copyFailure.Raw = append(json.RawMessage(nil), failure.Raw...)
+	return &copyFailure
 }
 
 func (s *turnState) fail(err error) {
-	s.once.Do(func() {
-		s.done <- turnCompletion{result: s.snapshot(), err: err}
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return
+	}
+	s.finished = true
+	s.done <- turnCompletion{result: s.snapshotLocked(), err: err}
 }
 
 func (s *turnState) snapshot() TurnResult {
@@ -352,10 +425,7 @@ func (s *turnState) snapshot() TurnResult {
 }
 
 func (s *turnState) snapshotLocked() TurnResult {
-	items := make([]json.RawMessage, len(s.items))
-	for i, item := range s.items {
-		items[i] = append(json.RawMessage(nil), item...)
-	}
+	items := cloneRawMessages(s.items)
 	result := TurnResult{
 		ThreadID: s.threadID,
 		TurnID:   s.turnID,
@@ -365,6 +435,18 @@ func (s *turnState) snapshotLocked() TurnResult {
 	}
 	result.FinalText = finalAgentText(items)
 	return result
+}
+
+func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
+	copyItems := make([]json.RawMessage, len(items))
+	for i, item := range items {
+		copyItems[i] = append(json.RawMessage(nil), item...)
+	}
+	return copyItems
+}
+
+func hasOutputSchema(schema json.RawMessage) bool {
+	return len(schema) != 0 && !bytes.Equal(bytes.TrimSpace(schema), []byte("null"))
 }
 
 func (s *turnState) hasOutputSchema() bool { return s.structured }
