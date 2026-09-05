@@ -2,6 +2,7 @@ package aether
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -242,14 +243,22 @@ func (c *Client) decodeLoop() {
 }
 
 func (c *Client) enqueueServerRequest(request ServerRequest) {
+	if c.opts.Handlers[request.Method] == nil {
+		c.rejectServerRequest(request.ID, -32601, "method not found")
+		return
+	}
 	select {
 	case c.serverRequests <- request:
 	default:
-		wire, err := jsonrpc.EncodeError(request.ID, jsonrpc.RPCError{Code: -32000, Message: "server request queue is full"})
-		if err != nil || !c.sendWireAsync(wire) {
-			c.terminate(errors.New("server request queue is full"))
-			c.killProcess()
-		}
+		c.rejectServerRequest(request.ID, -32000, "server request queue is full")
+	}
+}
+
+func (c *Client) rejectServerRequest(id json.RawMessage, code int, message string) {
+	wire, err := jsonrpc.EncodeError(id, jsonrpc.RPCError{Code: code, Message: message})
+	if err != nil || !c.sendWireAsync(wire) {
+		c.terminate(errors.New(message))
+		c.killProcess()
 	}
 }
 

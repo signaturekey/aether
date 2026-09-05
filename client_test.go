@@ -302,6 +302,47 @@ func TestSlowHandlerDoesNotBlockDecoder(t *testing.T) {
 	}
 }
 
+func TestUnknownServerRequestDoesNotWaitForBusyHandlers(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{}, maxServerRequestHandlers)
+	client := startHelper(t, "", func(opts *Options) {
+		opts.Handlers = map[string]RequestHandler{
+			"demo/block": func(context.Context, ServerRequest) (any, error) {
+				started <- struct{}{}
+				<-release
+				return nil, nil
+			},
+		}
+	})
+	if err := client.Call(context.Background(), "triggerServerRequests", map[string]any{
+		"method": "demo/block", "count": maxServerRequestHandlers,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for range maxServerRequestHandlers {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("server request handlers did not start")
+		}
+	}
+	if err := client.Call(context.Background(), "triggerServerRequest", map[string]string{"method": "demo/unknown"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var response struct {
+		Error *wireTestError `json:"error"`
+	}
+	if err := client.Call(ctx, "awaitServerResponse", nil, &response); err != nil {
+		t.Fatalf("unknown request waited for a handler: %v", err)
+	}
+	if response.Error == nil || response.Error.Code != -32601 {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 func TestServerRequestQueueIsBounded(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
