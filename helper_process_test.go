@@ -186,7 +186,7 @@ func (s *helperServer) startTurn(id json.RawMessage, params json.RawMessage) {
 		"item": map[string]any{"id": "commentary", "type": "agentMessage", "phase": "commentary", "text": "working"},
 	}})
 	text := "done for " + request.ThreadID
-	if len(request.OutputSchema) != 0 {
+	if hasOutputSchema(request.OutputSchema) {
 		if s.scenario == "invalid_output" {
 			text = "not json"
 		} else {

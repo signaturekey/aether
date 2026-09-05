@@ -56,6 +56,20 @@ func TestInvalidStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestNullOutputSchemaAllowsTextOutput(t *testing.T) {
+	client := startHelper(t, "", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := textTurn("plain")
+	req.OutputSchema = json.RawMessage(` null `)
+	result, err := thread.Run(context.Background(), req)
+	if err != nil || result.FinalText != "done for "+thread.ID() || len(result.JSON) != 0 {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+}
+
 func TestFailedTurnPreservesResult(t *testing.T) {
 	client := startHelper(t, "failed_turn", nil)
 	thread, err := client.StartThread(context.Background(), ThreadOptions{})

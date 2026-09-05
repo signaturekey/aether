@@ -91,6 +91,8 @@ fmt.Println(result.FinalText)
 - `Run` завершается только после authoritative-уведомления `turn/completed`.
 - `TurnResult.Items` сохраняет канонические `item/completed`; items из completion
   используются только когда потоковых items не было.
+- `TurnRequest.OutputSchema` со значением `nil` или JSON `null` не включает
+  structured-output validation.
 - Отмена `Run` отправляет `turn/interrupt` через внутренний bounded context и не
   останавливает клиент или несвязанные turns.
 - Если после отмены невозможно достоверно установить или завершить turn, этот

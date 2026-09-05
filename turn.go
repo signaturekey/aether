@@ -1,6 +1,7 @@
 package aether
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -114,7 +115,7 @@ func (t *Thread) Run(ctx context.Context, req TurnRequest) (TurnResult, error) {
 	}
 	defer t.endRun()
 
-	state := newTurnState(t.id, len(req.OutputSchema) != 0)
+	state := newTurnState(t.id, hasOutputSchema(req.OutputSchema))
 	if err := t.client.registerTurn(t.id, state); err != nil {
 		return TurnResult{}, err
 	}
@@ -442,6 +443,10 @@ func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
 		copyItems[i] = append(json.RawMessage(nil), item...)
 	}
 	return copyItems
+}
+
+func hasOutputSchema(schema json.RawMessage) bool {
+	return len(schema) != 0 && !bytes.Equal(bytes.TrimSpace(schema), []byte("null"))
 }
 
 func (s *turnState) hasOutputSchema() bool { return s.structured }
