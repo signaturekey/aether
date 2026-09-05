@@ -91,6 +91,9 @@ fmt.Println(result.FinalText)
 - `Run` завершается только после authoritative-уведомления `turn/completed`.
 - Отмена `Run` отправляет `turn/interrupt` через внутренний bounded context и не
   останавливает клиент или несвязанные turns.
+- Если после отмены невозможно достоверно установить или завершить turn, этот
+  `Thread` больше не принимает `Run` и возвращает `aether.ErrThreadStateUnknown`.
+  Создайте новый thread вместо повторного запуска в неопределённом состоянии.
 - Отмена raw `Call` удаляет локальный waiter, но сервер уже мог выполнить запрос.
   Aether не делает автоматических retry.
 - Неизвестные поля, методы уведомлений и типы items безопасно игнорируются или
@@ -121,7 +124,8 @@ err := client.Call(ctx, "mcpServerStatus/list", struct{}{}, &status)
 ## Разработка
 
 ```bash
-gofmt -w .
+gofmt -w <изменённые Go-файлы>
+gofmt -l .
 go test ./...
 go test -race ./...
 go vet ./...

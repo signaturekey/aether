@@ -207,6 +207,104 @@ func TestInterruptTimeoutIsBounded(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("interrupt timeout was not bounded")
 	}
+	if _, err := thread.Run(context.Background(), textTurn("second")); !errors.Is(err, ErrThreadStateUnknown) {
+		t.Fatalf("error = %v, want ErrThreadStateUnknown", err)
+	}
+}
+
+func TestLateStartAfterCancellationMakesThreadUnavailable(t *testing.T) {
+	client := startHelper(t, "delayed_start", func(opts *Options) {
+		opts.InterruptTimeout = 30 * time.Millisecond
+	})
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := thread.Run(ctx, textTurn("hold"))
+		done <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrThreadStateUnknown) {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn/start cancellation recovery did not time out")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := thread.Run(context.Background(), textTurn("second")); !errors.Is(err, ErrThreadStateUnknown) {
+		t.Fatalf("error = %v, want ErrThreadStateUnknown", err)
+	}
+}
+
+func TestLateCompletionCannotFinishAnotherTurn(t *testing.T) {
+	state := newTurnState("thr_1", false)
+	if err := state.setTurnID("turn_new"); err != nil {
+		t.Fatal(err)
+	}
+	state.complete("turn_old", TurnStatusCompleted, nil, nil)
+	select {
+	case completion := <-state.done:
+		t.Fatalf("unexpected completion: %#v", completion)
+	default:
+	}
+	state.complete("turn_new", TurnStatusCompleted, nil, nil)
+	select {
+	case completion := <-state.done:
+		if completion.result.TurnID != "turn_new" || completion.result.Status != TurnStatusCompleted {
+			t.Fatalf("completion = %#v", completion)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected completion")
+	}
+}
+
+func TestLateInterruptedCompletionDoesNotReopenThread(t *testing.T) {
+	client := startHelper(t, "late_interrupt_completion", func(opts *Options) {
+		opts.InterruptTimeout = 30 * time.Millisecond
+	})
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := thread.Run(ctx, textTurn("hold"))
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrThreadStateUnknown) {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("interrupt timeout was not bounded")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := thread.Run(context.Background(), textTurn("second")); !errors.Is(err, ErrThreadStateUnknown) {
+		t.Fatalf("error = %v, want ErrThreadStateUnknown", err)
+	}
+}
+
+func TestCompletionItemsAreAuthoritative(t *testing.T) {
+	state := newTurnState("thr_1", false)
+	if err := state.setTurnID("turn_1"); err != nil {
+		t.Fatal(err)
+	}
+	state.addItem("turn_1", json.RawMessage(`{"id":"partial"}`))
+	state.complete("turn_1", TurnStatusCompleted, []json.RawMessage{json.RawMessage(`{"id":"final"}`)}, nil)
+	completion := <-state.done
+	if len(completion.result.Items) != 1 || string(completion.result.Items[0]) != `{"id":"final"}` {
+		t.Fatalf("items = %s", completion.result.Items)
+	}
 }
 
 func TestClientCloseFailsActiveTurn(t *testing.T) {

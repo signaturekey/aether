@@ -94,6 +94,10 @@ func (s *helperServer) handleRequest(id json.RawMessage, method string, params j
 		s.sendErrorWithData(id, 123, "expected failure", json.RawMessage(`{"kind":"test"}`))
 	case "block":
 		return
+	case "closeStdout":
+		s.sendResult(id, map[string]any{})
+		_ = os.Stdout.Close()
+		select {}
 	case "die":
 		_, _ = fmt.Fprint(os.Stderr, "helper process exploded")
 		os.Exit(7)
@@ -112,6 +116,16 @@ func (s *helperServer) handleRequest(id json.RawMessage, method string, params j
 		_ = json.Unmarshal(params, &request)
 		s.sendResult(id, map[string]bool{"sent": true})
 		s.send(map[string]any{"id": "server-1", "method": request.Method, "params": map[string]string{"value": "hello"}})
+	case "triggerServerRequests":
+		var request struct {
+			Method string `json:"method"`
+			Count  int    `json:"count"`
+		}
+		_ = json.Unmarshal(params, &request)
+		for i := range request.Count {
+			s.send(map[string]any{"id": "server-" + strconv.Itoa(i+1), "method": request.Method, "params": map[string]string{"value": "hello"}})
+		}
+		s.sendResult(id, map[string]bool{"sent": true})
 	case "awaitServerResponse":
 		if s.serverReply != nil || s.serverError != nil {
 			s.sendCaptured(id)
@@ -140,7 +154,7 @@ func (s *helperServer) startTurn(id json.RawMessage, params json.RawMessage) {
 	}
 	s.sendResult(id, map[string]any{"turn": map[string]any{"id": turnID, "status": "inProgress", "items": []any{}, "error": nil}})
 	holds := s.scenario == "hold_turn" || s.scenario == "delayed_start" ||
-		s.scenario == "interrupt_timeout" || s.scenario == "interrupt_die"
+		s.scenario == "interrupt_timeout" || s.scenario == "late_interrupt_completion" || s.scenario == "interrupt_die"
 	if holds && len(request.Input) != 0 && request.Input[0].Text == "hold" {
 		return
 	}
@@ -190,6 +204,16 @@ func (s *helperServer) interruptTurn(id json.RawMessage, params json.RawMessage)
 	}
 	s.sendResult(id, map[string]any{})
 	if s.scenario == "interrupt_timeout" {
+		return
+	}
+	if s.scenario == "late_interrupt_completion" {
+		go func() {
+			time.Sleep(80 * time.Millisecond)
+			s.send(map[string]any{"method": "turn/completed", "params": map[string]any{
+				"threadId": request.ThreadID,
+				"turn":     map[string]any{"id": request.TurnID, "status": "interrupted", "items": []any{}, "error": nil},
+			}})
+		}()
 		return
 	}
 	s.send(map[string]any{"method": "turn/completed", "params": map[string]any{

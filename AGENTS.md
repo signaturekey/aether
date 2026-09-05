@@ -243,7 +243,8 @@ temporary directories and must not modify user projects or external systems.
 Before reporting completion, run as applicable:
 
 ```text
-gofmt -w .
+gofmt -w <Go files changed by this task>
+gofmt -l .
 go test ./...
 go test -race ./...
 go vet ./...

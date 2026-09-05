@@ -61,8 +61,8 @@ type turnState struct {
 	failure    *TurnFailure
 	structured bool
 
-	done chan turnCompletion
-	once sync.Once
+	done     chan turnCompletion
+	finished bool
 }
 
 type turnCompletion struct {
@@ -163,8 +163,9 @@ func (t *Thread) recoverCancelledStart(
 		}
 		return t.interruptAfterCancellation(callerCtx.Err(), state)
 	case <-timer.C:
+		t.markStateUnknown()
 		cancelStart()
-		return state.snapshot(), &TurnError{Result: state.snapshot(), Cause: errors.Join(callerCtx.Err(), errors.New("timed out recovering turn/start after cancellation"))}
+		return state.snapshot(), &TurnError{Result: state.snapshot(), Cause: errors.Join(callerCtx.Err(), ErrThreadStateUnknown, errors.New("timed out recovering turn/start after cancellation"))}
 	case completion := <-state.done:
 		return completion.result, &TurnError{Result: completion.result, Cause: callerCtx.Err()}
 	}
@@ -203,7 +204,8 @@ func (t *Thread) interruptAfterCancellation(callerErr error, state *turnState) (
 		}
 	}
 	result := state.snapshot()
-	return result, &TurnError{Result: result, Cause: errors.Join(callerErr, interruptErr)}
+	t.markStateUnknown()
+	return result, &TurnError{Result: result, Cause: errors.Join(callerErr, ErrThreadStateUnknown, interruptErr)}
 }
 
 func (t *Thread) Interrupt(ctx context.Context, turnID string) error {
@@ -303,6 +305,9 @@ func (s *turnState) getTurnID() string {
 func (s *turnState) addItem(turnID string, item json.RawMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.finished {
+		return
+	}
 	if s.turnID != "" && turnID != "" && s.turnID != turnID {
 		return
 	}
@@ -313,36 +318,36 @@ func (s *turnState) addItem(turnID string, item json.RawMessage) {
 }
 
 func (s *turnState) complete(turnID string, status TurnStatus, items []json.RawMessage, failure *TurnFailure) {
-	s.once.Do(func() {
-		s.mu.Lock()
-		if s.turnID == "" {
-			s.turnID = turnID
-		}
-		if s.turnID != turnID {
-			s.mu.Unlock()
-			s.done <- turnCompletion{result: s.snapshot(), err: fmt.Errorf("received completion for unexpected turn %s", turnID)}
-			return
-		}
-		s.status = status
-		if len(s.items) == 0 {
-			for _, item := range items {
-				s.items = append(s.items, append(json.RawMessage(nil), item...))
-			}
-		}
-		if failure != nil {
-			copyFailure := *failure
-			s.failure = &copyFailure
-		}
-		result := s.snapshotLocked()
-		s.mu.Unlock()
-		s.done <- turnCompletion{result: result}
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished || (s.turnID != "" && s.turnID != turnID) {
+		return
+	}
+	if s.turnID == "" {
+		s.turnID = turnID
+	}
+	s.finished = true
+	s.status = status
+	if len(items) != 0 {
+		s.items = cloneRawMessages(items)
+	}
+	if failure != nil {
+		copyFailure := *failure
+		copyFailure.CodexErrorInfo = append(json.RawMessage(nil), failure.CodexErrorInfo...)
+		copyFailure.AdditionalDetails = append(json.RawMessage(nil), failure.AdditionalDetails...)
+		s.failure = &copyFailure
+	}
+	s.done <- turnCompletion{result: s.snapshotLocked()}
 }
 
 func (s *turnState) fail(err error) {
-	s.once.Do(func() {
-		s.done <- turnCompletion{result: s.snapshot(), err: err}
-	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return
+	}
+	s.finished = true
+	s.done <- turnCompletion{result: s.snapshotLocked(), err: err}
 }
 
 func (s *turnState) snapshot() TurnResult {
@@ -352,10 +357,7 @@ func (s *turnState) snapshot() TurnResult {
 }
 
 func (s *turnState) snapshotLocked() TurnResult {
-	items := make([]json.RawMessage, len(s.items))
-	for i, item := range s.items {
-		items[i] = append(json.RawMessage(nil), item...)
-	}
+	items := cloneRawMessages(s.items)
 	result := TurnResult{
 		ThreadID: s.threadID,
 		TurnID:   s.turnID,
@@ -365,6 +367,14 @@ func (s *turnState) snapshotLocked() TurnResult {
 	}
 	result.FinalText = finalAgentText(items)
 	return result
+}
+
+func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
+	copyItems := make([]json.RawMessage, len(items))
+	for i, item := range items {
+		copyItems[i] = append(json.RawMessage(nil), item...)
+	}
+	return copyItems
 }
 
 func (s *turnState) hasOutputSchema() bool { return s.structured }
