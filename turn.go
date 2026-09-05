@@ -206,12 +206,18 @@ func (t *Thread) interruptAfterCancellation(callerErr error, state *turnState) (
 		select {
 		case completion := <-state.done:
 			result := completion.result
-			return result, &TurnError{Result: result, Cause: callerErr}
+			return result, &TurnError{Result: result, Cause: errors.Join(callerErr, completion.err)}
 		case <-interruptCtx.Done():
 			interruptErr = errors.New("timed out waiting for interrupted turn/completed")
 		case <-t.client.terminal:
 			interruptErr = t.client.getTerminalError()
 		}
+	}
+	select {
+	case completion := <-state.done:
+		result := completion.result
+		return result, &TurnError{Result: result, Cause: errors.Join(callerErr, completion.err)}
+	default:
 	}
 	result := state.snapshot()
 	t.markStateUnknown()

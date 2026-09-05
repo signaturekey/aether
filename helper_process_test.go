@@ -160,7 +160,8 @@ func (s *helperServer) startTurn(id json.RawMessage, params json.RawMessage) {
 	}
 	s.sendResult(id, map[string]any{"turn": map[string]any{"id": turnID, "status": "inProgress", "items": []any{}, "error": nil}})
 	holds := s.scenario == "hold_turn" || s.scenario == "delayed_start" ||
-		s.scenario == "interrupt_timeout" || s.scenario == "late_interrupt_completion" || s.scenario == "interrupt_die"
+		s.scenario == "interrupt_timeout" || s.scenario == "late_interrupt_completion" ||
+		s.scenario == "interrupt_die" || s.scenario == "completion_before_interrupt_error"
 	if holds && len(request.Input) != 0 && request.Input[0].Text == "hold" {
 		return
 	}
@@ -207,6 +208,14 @@ func (s *helperServer) interruptTurn(id json.RawMessage, params json.RawMessage)
 	if s.scenario == "interrupt_die" {
 		_, _ = fmt.Fprint(os.Stderr, "died during interrupt")
 		os.Exit(9)
+	}
+	if s.scenario == "completion_before_interrupt_error" {
+		s.send(map[string]any{"method": "turn/completed", "params": map[string]any{
+			"threadId": request.ThreadID,
+			"turn":     map[string]any{"id": request.TurnID, "status": "completed", "items": []any{}, "error": nil},
+		}})
+		s.sendError(id, -32000, "no active turn to interrupt")
+		return
 	}
 	s.sendResult(id, map[string]any{})
 	if s.scenario == "interrupt_timeout" {

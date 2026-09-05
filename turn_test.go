@@ -288,6 +288,42 @@ func TestLateCompletionCannotFinishAnotherTurn(t *testing.T) {
 	}
 }
 
+func TestCompletionBeforeInterruptErrorKeepsThreadUsable(t *testing.T) {
+	client := startHelper(t, "completion_before_interrupt_error", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		result TurnResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := thread.Run(ctx, textTurn("hold"))
+		done <- struct {
+			result TurnResult
+			err    error
+		}{result, err}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || got.result.Status != TurnStatusCompleted {
+			t.Fatalf("result=%#v error=%v", got.result, got.err)
+		}
+		if errors.Is(got.err, ErrThreadStateUnknown) {
+			t.Fatalf("error = %v, thread state must remain known", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled turn did not finish")
+	}
+	if result, err := thread.Run(context.Background(), textTurn("next")); err != nil || result.Status != TurnStatusCompleted {
+		t.Fatalf("thread unusable after authoritative completion: result=%#v error=%v", result, err)
+	}
+}
+
 func TestLateInterruptedCompletionDoesNotReopenThread(t *testing.T) {
 	client := startHelper(t, "late_interrupt_completion", func(opts *Options) {
 		opts.InterruptTimeout = 30 * time.Millisecond
