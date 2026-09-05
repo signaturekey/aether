@@ -105,7 +105,8 @@ fmt.Println(result.FinalText)
 
 Ошибки сохраняют структурированный контекст и поддерживают `errors.Is` и
 `errors.As`. Это относится к `RPCError`, `ProcessError` и `TurnError` с частичным
-`TurnResult`.
+`TurnResult`. `TurnFailure.Raw` сохраняет полный payload terminal error для
+развивающихся полей App Server.
 
 <a id="raw-rpc-and-mcp"></a>
 

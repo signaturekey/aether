@@ -69,6 +69,24 @@ func TestFailedTurnPreservesResult(t *testing.T) {
 	}
 }
 
+func TestFailedTurnPreservesRawErrorPayload(t *testing.T) {
+	client := startHelper(t, "failed_misalignment", nil)
+	thread, err := client.StartThread(context.Background(), ThreadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := thread.Run(context.Background(), textTurn("fail"))
+	if err == nil || result.Failure == nil {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	var raw struct {
+		Misalignment json.RawMessage `json:"misalignment"`
+	}
+	if json.Unmarshal(result.Failure.Raw, &raw) != nil || string(raw.Misalignment) == "" {
+		t.Fatalf("raw failure = %s", result.Failure.Raw)
+	}
+}
+
 func TestParallelThreadsDoNotMixEvents(t *testing.T) {
 	client := startHelper(t, "", nil)
 	const count = 4

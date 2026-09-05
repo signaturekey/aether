@@ -165,10 +165,14 @@ func (s *helperServer) startTurn(id json.RawMessage, params json.RawMessage) {
 	if holds && len(request.Input) != 0 && request.Input[0].Text == "hold" {
 		return
 	}
-	if s.scenario == "failed_turn" {
+	if s.scenario == "failed_turn" || s.scenario == "failed_misalignment" {
+		failure := map[string]any{"message": "model failed"}
+		if s.scenario == "failed_misalignment" {
+			failure["misalignment"] = map[string]any{"reason": "policy blocked", "continuation": "resume later"}
+		}
 		s.send(map[string]any{"method": "turn/completed", "params": map[string]any{
 			"threadId": request.ThreadID,
-			"turn":     map[string]any{"id": turnID, "status": "failed", "items": []any{}, "error": map[string]string{"message": "model failed"}},
+			"turn":     map[string]any{"id": turnID, "status": "failed", "items": []any{}, "error": failure},
 		}})
 		return
 	}

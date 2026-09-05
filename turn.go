@@ -39,6 +39,18 @@ type TurnFailure struct {
 	Message           string          `json:"message"`
 	CodexErrorInfo    json.RawMessage `json:"codexErrorInfo,omitempty"`
 	AdditionalDetails json.RawMessage `json:"additionalDetails,omitempty"`
+	Raw               json.RawMessage `json:"-"`
+}
+
+func (f *TurnFailure) UnmarshalJSON(data []byte) error {
+	type turnFailure TurnFailure
+	var decoded turnFailure
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*f = TurnFailure(decoded)
+	f.Raw = append(json.RawMessage(nil), data...)
+	return nil
 }
 
 type TurnResult struct {
@@ -391,6 +403,7 @@ func cloneTurnFailure(failure *TurnFailure) *TurnFailure {
 	copyFailure := *failure
 	copyFailure.CodexErrorInfo = append(json.RawMessage(nil), failure.CodexErrorInfo...)
 	copyFailure.AdditionalDetails = append(json.RawMessage(nil), failure.AdditionalDetails...)
+	copyFailure.Raw = append(json.RawMessage(nil), failure.Raw...)
 	return &copyFailure
 }
 
