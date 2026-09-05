@@ -253,6 +253,12 @@ func TestServerRequestHandlers(t *testing.T) {
 		{"panic", "demo/panic", func(context.Context, ServerRequest) (any, error) {
 			panic("boom")
 		}, -32603, ""},
+		{"unserializable result", "demo/unserializable-result", func(context.Context, ServerRequest) (any, error) {
+			return make(chan struct{}), nil
+		}, -32603, ""},
+		{"unserializable error data", "demo/unserializable-error", func(context.Context, ServerRequest) (any, error) {
+			return nil, &RPCError{Code: 4321, Message: "declined", Data: json.RawMessage(`{`)}
+		}, -32603, ""},
 		{"unknown", "demo/unknown", nil, -32601, ""},
 	}
 	for _, tt := range tests {

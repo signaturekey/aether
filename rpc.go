@@ -217,6 +217,9 @@ func (c *Client) handleServerRequest(request ServerRequest) {
 		}
 		wire, err = jsonrpc.EncodeError(request.ID, wireErr)
 	}
+	if err != nil {
+		wire, err = jsonrpc.EncodeError(request.ID, jsonrpc.RPCError{Code: -32603, Message: "internal error"})
+	}
 	if err == nil {
 		_ = c.sendWire(c.ctx, wire)
 	}
