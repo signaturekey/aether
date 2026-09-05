@@ -89,6 +89,8 @@ fmt.Println(result.FinalText)
 - Разные threads могут выполнять turns параллельно. В одном thread одновременно
   разрешён только один `Run`; второй вернёт `aether.ErrTurnActive`.
 - `Run` завершается только после authoritative-уведомления `turn/completed`.
+- `TurnResult.Items` сохраняет канонические `item/completed`; items из completion
+  используются только когда потоковых items не было.
 - Отмена `Run` отправляет `turn/interrupt` через внутренний bounded context и не
   останавливает клиент или несвязанные turns.
 - Если после отмены невозможно достоверно установить или завершить turn, этот

@@ -318,15 +318,17 @@ func TestLateInterruptedCompletionDoesNotReopenThread(t *testing.T) {
 	}
 }
 
-func TestCompletionItemsAreAuthoritative(t *testing.T) {
+func TestCompletionSummaryDoesNotReplaceStreamedItems(t *testing.T) {
 	state := newTurnState("thr_1", false)
 	if err := state.setTurnID("turn_1"); err != nil {
 		t.Fatal(err)
 	}
-	state.addItem("turn_1", json.RawMessage(`{"id":"partial"}`))
-	state.complete("turn_1", TurnStatusCompleted, []json.RawMessage{json.RawMessage(`{"id":"final"}`)}, nil)
+	command := json.RawMessage(`{"id":"command","type":"commandExecution"}`)
+	state.addItem("turn_1", command)
+	summary := json.RawMessage(`{"id":"final","type":"agentMessage","text":"done"}`)
+	state.complete("turn_1", TurnStatusCompleted, []json.RawMessage{summary}, nil)
 	completion := <-state.done
-	if len(completion.result.Items) != 1 || string(completion.result.Items[0]) != `{"id":"final"}` {
+	if len(completion.result.Items) != 1 || string(completion.result.Items[0]) != string(command) {
 		t.Fatalf("items = %s", completion.result.Items)
 	}
 }

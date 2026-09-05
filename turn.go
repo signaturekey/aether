@@ -371,7 +371,7 @@ func (s *turnState) complete(turnID string, status TurnStatus, items []json.RawM
 func (s *turnState) completeLocked(status TurnStatus, items []json.RawMessage, failure *TurnFailure) {
 	s.finished = true
 	s.status = status
-	if len(items) != 0 {
+	if len(s.items) == 0 && len(items) != 0 {
 		s.items = cloneRawMessages(items)
 	}
 	s.failure = cloneTurnFailure(failure)
